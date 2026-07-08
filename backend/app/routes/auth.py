@@ -1,33 +1,84 @@
-import logging
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from ..schemas.user import UserCreate, UserRead, Token
-from ..services.auth import AuthService
-from ..dependencies import get_db
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
+from fastapi.security import HTTPBearer
 
-router = APIRouter(prefix="/auth", tags=["auth"])
-logger = logging.getLogger("app.routes.auth")
+from app.db.session import get_db_session
+from app.db.repository import UserRepository
+from app.services.auth import get_auth_service, AuthService
+from app.schemas.auth import UserCreate, UserLogin, Token, RefreshToken, UserOut
+from app.core.security import verify_token
+from app.core.rate_limiter import RateLimiter
+from app.core.config import settings
 
-@router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
-    try:
-        user = await AuthService.register_user(db, user_in)
-        return user
-    except ValueError as ve:
-        logger.warning("Registration error: %s", ve)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
-    except Exception as exc:
-        logger.exception("Unexpected error during registration")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
+from redis.asyncio import Redis
+
+router = APIRouter()
+bearer = HTTPBearer(auto_error=False)
+
+
+@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+async def register(
+    payload: UserCreate,
+    session=Depends(get_db_session),
+    redis: Redis = Depends(lambda: Redis.from_url(settings.REDIS_URL)),
+    rate_limiter: RateLimiter = Depends(lambda: RateLimiter(redis)),
+):
+    await rate_limiter.check_rate_limit(Request({"url": "/api/v1/auth/register"}), "auth:register")
+    user_repo = UserRepository(session)
+    auth_service = get_auth_service(user_repo)
+    user = await auth_service.register_user(payload)
+    return user
+
 
 @router.post("/login", response_model=Token)
-async def login(form: UserCreate, db: AsyncSession = Depends(get_db)):
+async def login(
+    payload: UserLogin,
+    session=Depends(get_db_session),
+    redis: Redis = Depends(lambda: Redis.from_url(settings.REDIS_URL)),
+    rate_limiter: RateLimiter = Depends(lambda: RateLimiter(redis)),
+):
+    await rate_limiter.check_rate_limit(Request({"url": "/api/v1/auth/login"}), "auth:login")
+    user_repo = UserRepository(session)
+    auth_service = get_auth_service(user_repo)
+    user = await auth_service.authenticate_user(payload)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "Invalid credentials"}
+        )
+    tokens = await auth_service.create_tokens(user)
+    return Token(**tokens)
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh(
+    payload: RefreshToken,
+    session=Depends(get_db_session),
+    redis: Redis = Depends(lambda: Redis.from_url(settings.REDIS_URL)),
+    rate_limiter: RateLimiter = Depends(lambda: RateLimiter(redis)),
+):
+    await rate_limiter.check_rate_limit(Request({"url": "/api/v1/auth/refresh"}), "auth:refresh")
+    user_repo = UserRepository(session)
+    auth_service = get_auth_service(user_repo)
+    tokens = await auth_service.refresh_tokens(payload.refresh_token)
+    return Token(**tokens)
+
+
+@router.get("/me", response_model=UserOut)
+async def get_me(
+    token: str = Depends(bearer),
+    session=Depends(get_db_session),
+):
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"error": "Not authenticated"})
     try:
-        token = await AuthService.authenticate_user(db, form.email, form.password)
-        return token
-    except ValueError as ve:
-        logger.warning("Login failed: %s", ve)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(ve))
-    except Exception as exc:
-        logger.exception("Unexpected error during login")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
+        payload = verify_token(token.credentials, token_type="access")
+        if not payload:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"error": "Invalid token"})
+        user_id = payload.get("sub")
+        user_repo = UserRepository(session)
+        user = await user_repo.get_by_id(User, user_id)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error": "User not found"})
+        return UserOut.from_orm(user)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"error": "Invalid token"})

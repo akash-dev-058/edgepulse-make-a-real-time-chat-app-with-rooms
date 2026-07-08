@@ -1,18 +1,34 @@
-from __future__ import annotations
 from pydantic import BaseModel, Field
-from uuid import UUID
+from typing import Optional
 from datetime import datetime
 
-class MessageCreate(BaseModel):
-    room_id: UUID = Field(..., description="Target room ID")
-    content: str = Field(..., min_length=1, max_length=2000)
 
-class MessageRead(BaseModel):
-    id: UUID
-    room_id: UUID
-    user_id: UUID | None
+class MessageBase(BaseModel):
+    content: str = Field(..., min_length=1, max_length=5000)
+
+
+
+class MessageCreate(MessageBase):
+    pass
+
+
+class MessageOut(BaseModel):
+    id: int
     content: str
+    content_sanitized: str
+    author_id: int
+    author_username: str
+    room_id: int
     created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MessagePagination(BaseModel):
+    items: list[MessageOut]
+    next_offset: Optional[int] = None
+    has_more: bool
 
     class Config:
         from_attributes = True

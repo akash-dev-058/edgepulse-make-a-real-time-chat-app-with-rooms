@@ -1,18 +1,45 @@
-from __future__ import annotations
 from pydantic import BaseModel, Field
-from uuid import UUID
-from datetime import datetime
-from typing import List
+from typing import Optional
 
-class RoomCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
 
-class RoomRead(BaseModel):
-    id: UUID
+class RoomBase(BaseModel):
+    name: str = Field(..., min_length=3, max_length=255)
+    description: Optional[str] = None
+    is_private: bool = False
+    max_members: Optional[int] = None
+
+
+
+class RoomCreate(RoomBase):
+    pass
+
+
+class RoomOut(BaseModel):
+    id: int
     name: str
-    owner_id: UUID
-    created_at: datetime
-    member_ids: List[UUID] = []
+    slug: str
+    description: Optional[str]
+    is_private: bool
+    max_members: Optional[int]
+    owner_id: int
+
+    class Config:
+        from_attributes = True
+
+
+class RoomMemberOut(BaseModel):
+    user_id: int
+    username: str
+    joined_at: str
+
+    class Config:
+        from_attributes = True
+
+
+class RoomDetailOut(RoomOut):
+    owner_username: str
+    member_count: int
+    is_member: bool
 
     class Config:
         from_attributes = True

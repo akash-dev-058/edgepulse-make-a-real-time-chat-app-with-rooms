@@ -1,36 +1,86 @@
-import logging
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from ..schemas.message import MessageCreate, MessageRead
-from ..services.message_service import MessageService
-from ..dependencies import get_current_user, get_db
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.security import HTTPBearer
 
-router = APIRouter(prefix="/messages", tags=["messages"])
-logger = logging.getLogger("app.routes.messages")
+from app.db.session import get_db_session
+from app.db.repository import MessageRepository, RoomRepository, UserRepository
+from app.services.message_service import get_message_service, MessageService
+from app.schemas.message import MessageCreate, MessageOut, MessagePagination
+from app.core.rate_limiter import RateLimiter
+from app.core.config import settings
 
-@router.post("/", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
-async def send_message(msg_in: MessageCreate, current_user = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    try:
-        message = await MessageService.create_message(db, str(current_user.id), msg_in)
-        return message
-    except Exception as exc:
-        logger.exception("Failed to send message")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not send message")
+from redis.asyncio import Redis
 
-@router.get("/room/{room_id}", response_model=list[MessageRead])
-async def get_room_messages(
-    room_id: str,
-    limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    current_user = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+router = APIRouter()
+bearer = HTTPBearer(auto_error=False)
+
+
+@router.post("/{room_slug}", response_model=MessageOut, status_code=status.HTTP_201_CREATED)
+async def create_message(
+    room_slug: str,
+    payload: MessageCreate,
+    token: str = Depends(bearer),
+    session=Depends(get_db_session),
+    redis: Redis = Depends(lambda: Redis.from_url(settings.REDIS_URL)),
+    rate_limiter: RateLimiter = Depends(lambda: RateLimiter(redis)),
 ):
-    # Verify user is member of room
-    from ..models.room import Room
-    room = await db.get(Room, room_id)
-    if not room:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found")
-    if current_user.id != room.owner_id and current_user not in room.members:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-    messages = await MessageService.get_messages(db, room_id, limit=limit, offset=offset)
-    return messages
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"error": "Not authenticated"})
+    payload_token = verify_token(token.credentials, token_type="access")
+    if not payload_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"error": "Invalid token"})
+    user_id = int(payload_token.get("sub"))
+
+    await rate_limiter.check_rate_limit(Request({"url": f"/api/v1/messages/{room_slug}"}), f"messages:create:{user_id}")
+
+    user_repo = UserRepository(session)
+    room_repo = RoomRepository(session)
+    message_repo = MessageRepository(session)
+    message_service = get_message_service(message_repo, room_repo)
+    user = await user_repo.get_by_id(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"error": "User not found"})
+    message = await message_service.create_message(payload, user, room_slug)
+    return message
+
+
+@router.get("/{room_slug}", response_model=MessagePagination)
+async def list_messages(
+    room_slug: str,
+    limit: int = 50,
+    offset: int = 0,
+    before: datetime = None,
+    token: str = Depends(bearer),
+    session=Depends(get_db_session),
+    redis: Redis = Depends(lambda: Redis.from_url(settings.REDIS_URL)),
+    rate_limiter: RateLimiter = Depends(lambda: RateLimiter(redis)),
+):
+    await rate_limiter.check_rate_limit(Request({"url": f"/api/v1/messages/{room_slug}"}), f"messages:list:{room_slug}")
+
+    user_repo = UserRepository(session)
+    room_repo = RoomRepository(session)
+    message_repo = MessageRepository(session)
+    message_service = get_message_service(message_repo, room_repo)
+    pagination = await message_service.list_messages(room_slug, limit=limit, offset=offset, before=before)
+    return pagination
+
+
+@router.get("/{room_slug}/search", response_model=MessagePagination)
+async def search_messages(
+    room_slug: str,
+    query: str,
+    limit: int = 50,
+    offset: int = 0,
+    token: str = Depends(bearer),
+    session=Depends(get_db_session),
+    redis: Redis = Depends(lambda: Redis.from_url(settings.REDIS_URL)),
+    rate_limiter: RateLimiter = Depends(lambda: RateLimiter(redis)),
+):
+    await rate_limiter.check_rate_limit(Request({"url": f"/api/v1/messages/{room_slug}/search"}), f"messages:search:{room_slug}")
+
+    user_repo = UserRepository(session)
+    room_repo = RoomRepository(session)
+    message_repo = MessageRepository(session)
+    message_service = get_message_service(message_repo, room_repo)
+    pagination = await message_service.search_messages(room_slug, query, limit=limit, offset=offset)
+    return pagination

@@ -1,21 +1,25 @@
-import uuid
-from sqlalchemy import Column, Text, DateTime, ForeignKey, Index, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Text, ForeignKey, Index
 from sqlalchemy.orm import relationship
-from .base import Base
 
-class Message(Base):
+from app.models.base import BaseModel
+
+
+class Message(BaseModel):
     __tablename__ = "messages"
-    __table_args__ = (
-        Index("ix_messages_room_id", "room_id"),
-        Index("ix_messages_user_id", "user_id"),
-    )
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    room_id = Column(UUID(as_uuid=True), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    content_sanitized = Column(Text, nullable=False)
 
-    room = relationship("Room", backref="messages")
-    user = relationship("User", backref="messages")
+    # Foreign keys
+    author_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    room_id = Column(Integer, ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+
+    # Relationships
+    author = relationship("User", back_populates="messages")
+    room = relationship("Room", back_populates="messages")
+
+    # Indexes
+    __table_args__ = (
+        Index("ix_messages_room_id_created_at", "room_id", "created_at"),
+        Index("ix_messages_author_id", "author_id"),
+    )

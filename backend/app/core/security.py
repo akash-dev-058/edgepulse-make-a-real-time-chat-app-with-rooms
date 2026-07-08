@@ -1,43 +1,51 @@
-from datetime import datetime, timedelta, timezone
-from typing import Any
-from jose import JWTError, jwt
+import secrets
+from datetime import datetime, timedelta
+from typing import Optional, Union
+
+from jose import jwt
 from passlib.context import CryptContext
-from ..core.config import settings
+
+from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plain password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+# JWT utilities
 
-def get_password_hash(password: str) -> str:
-    """Hash a password using bcrypt with default rounds (12)."""
-    return pwd_context.hash(password)
-
-def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
-    """Create a JWT access token.
-
-    Args:
-        data: Payload data to encode.
-        expires_delta: Optional custom expiration.
-    Returns:
-        JWT as a string.
-    """
-    to_encode = data.copy()
-    now = datetime.now(timezone.utc)
-    if expires_delta:
-        expire = now + expires_delta
-    else:
-        expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "iat": now})
-    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET, algorithm="HS256")
+def create_access_token(subject: Union[str, int], expires_delta: Optional[timedelta] = None) -> str:
+    now = datetime.utcnow()
+    expire = now + (expires_delta or timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode = {"exp": expire, "iat": now, "sub": str(subject), "type": "access"}
+    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
     return encoded_jwt
 
-def decode_access_token(token: str) -> dict[str, Any]:
-    """Decode and verify a JWT token.
 
-    Raises:
-        JWTError: If token is invalid or expired.
-    """
-    payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
-    return payload
+def create_refresh_token(subject: Union[str, int], expires_delta: Optional[timedelta] = None) -> str:
+    now = datetime.utcnow()
+    expire = now + (expires_delta or timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS))
+    to_encode = {"exp": expire, "iat": now, "sub": str(subject), "type": "refresh"}
+    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+    return encoded_jwt
+
+
+def verify_token(token: str, token_type: str = "access") -> Optional[dict]:
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        if payload.get("type") != token_type:
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def generate_room_slug(name: str) -> str:
+    # Sanitize and generate URL-friendly slug
+    slug = name.lower().strip().replace(" ", "-")
+    return slug + "-" + secrets.token_hex(4)
